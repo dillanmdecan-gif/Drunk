@@ -89,14 +89,14 @@ class Config:
     api_url: str = "wss://ws.binaryws.com/websockets/v3"
 
     # Contract
-    symbol:   str = "R_100"
-    duration: int = 1          # 1 tick
+    symbol:   str = "R_10"
+    duration: int = 3          # 1 tick
     currency: str = "USD"
 
     # ── AUTO-CALCULATION PARAMETERS ──────────────────────────────────────────
 
     # Bias detection window
-    bias_window: int   = 33    # rolling ticks for even_rate calculation
+    bias_window: int   = 20    # rolling ticks for even_rate calculation
     bias_high:   float = 0.65  # even_rate above this → bet ODD
     bias_low:    float = 0.35  # even_rate below this → bet EVEN
 
