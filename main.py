@@ -89,7 +89,7 @@ class Config:
     api_url: str = "wss://ws.binaryws.com/websockets/v3"
 
     # Contract
-    symbol:   str = "1HZ100V"
+    symbol:   str = "R_100"
     duration: int = 1          # 1 tick
     currency: str = "USD"
 
@@ -126,7 +126,7 @@ class Config:
     max_balance_pct: float = 0.05   # never risk more than 5% of balance
 
     # Cooldown: skip this many ticks after a loss before re-entering
-    loss_cooldown_ticks: int = 5
+    loss_cooldown_ticks: int = 13
 
     # Hard stops
     max_consecutive_losses: int   = 5
