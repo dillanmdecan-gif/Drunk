@@ -96,7 +96,7 @@ class Config:
     # ── AUTO-CALCULATION PARAMETERS ──────────────────────────────────────────
 
     # Bias detection window
-    bias_window: int   = 20    # rolling ticks for even_rate calculation
+    bias_window: int   = 33    # rolling ticks for even_rate calculation
     bias_high:   float = 0.65  # even_rate above this → bet ODD
     bias_low:    float = 0.35  # even_rate below this → bet EVEN
 
