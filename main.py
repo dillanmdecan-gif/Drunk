@@ -104,16 +104,16 @@ class Config:
     # Minimum observations per cell before the Markov signal is trusted
     markov_min_obs:  int   = 10
     # P(even | last_digit) must exceed this to fire a long-even signal
-    markov_thresh:   float = 0.54
+    markov_thresh:   float = 0.52
 
     # ── Z-SCORE PARAMETERS ───────────────────────────────────────────────────
 
     # Baseline window for computing rolling mean/std of even_rate
-    baseline_window: int   = 200
+    baseline_window: int   = 100
     # Short window for the instantaneous even_rate observation
     short_window:    int   = 20
     # |Z| must exceed this threshold to fire a signal
-    z_thresh:        float = 1.5
+    z_thresh:        float = 1.2
 
     # ── SIGNAL COMBINATION ───────────────────────────────────────────────────
 
