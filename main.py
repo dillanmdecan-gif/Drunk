@@ -1,37 +1,43 @@
 """
-Deriv Digits Even/Odd Bot  —  R_100  —  standalone, self-calibrating
-═══════════════════════════════════════════════════════════════════════
+Deriv Digits Even/Odd Bot  —  1HZ25V  —  Markov + Z-Score hybrid engine
+═══════════════════════════════════════════════════════════════════════════
 
 CONTRACT
   DIGITEVEN  → wins if last digit ∈ {0,2,4,6,8}  — P(win) ≈ 0.50
   DIGITODD   → wins if last digit ∈ {1,3,5,7,9}  — P(win) ≈ 0.50
-  Duration   : 1 tick
+  Duration   : 1 tick  (shortest feedback loop, no edge in waiting longer)
 
-AUTO-CALCULATION ENGINE (3 combined signals)
-  1. Bias Detection
-       Rolling even_rate = even_count / N over last BIAS_WINDOW ticks.
-       even_rate > BIAS_HIGH (0.65) → bias toward even → bet ODD (reversion)
-       even_rate < BIAS_LOW  (0.35) → bias toward odd  → bet EVEN (reversion)
-       Dead zone in between = no trade.
+SIGNAL ENGINE  (replaces old bias/streak engine)
+  Two independent signals combined — both must agree in direction:
 
-  2. Streak Detection
-       Count current run of identical outcomes (e.g. 5 evens in a row).
-       Enter only when streak ≥ MIN_STREAK (3), betting against continuation.
-       Longer streak → higher streak signal (capped at streak length 8).
+  1. Markov Chain
+       Full 10×10 transition matrix learned from observed digit sequences.
+       P(next=even | last_digit=d)  computed from empirical counts.
+       Signal fires when this conditional probability > MARKOV_THRESH.
+       e.g. "after a 7, P(even) = 0.63" is real structural information the
+       naive even_rate calculation misses entirely.
 
-  3. Entry Confidence Score (0–1)
-       confidence = BIAS_WEIGHT × bias_signal + STREAK_WEIGHT × streak_signal
-       Trade only when confidence ≥ threshold (auto-calibrated from rolling
-       hit rate of recent trades, bounded to [0.55, 0.75]).
+  2. Z-Score (adaptive, not fixed-baseline)
+       rolling_mean and rolling_std computed over BASELINE_WINDOW ticks.
+       short_rate = even_rate over SHORT_WINDOW (last N ticks).
+       Z = (short_rate − rolling_mean) / rolling_std
+       Fire only when |Z| > Z_THRESH (default 1.5).
+       Adaptive: if the market has been running 55% even for 200 ticks,
+       Z measures deviation from 55%, not from theoretical 50%.
 
-STAKE SIZING
-  Kelly-lite based on confidence, not fixed martingale.
-  f* = confidence - (1 - confidence)   (simplified Kelly for p=confidence, b=1)
-  stake = kelly_frac × f* × balance
-  Clamped to [MIN_STAKE, MAX_STAKE].
+  Combined confidence:
+       conf = MARKOV_W × markov_signal + ZSCORE_W × zscore_signal
+       Both signals must agree in direction; if they conflict → no trade.
+
+STAKE SIZING  — Martingale 1.15×, max 2 steps
+  Step 0 (base):    $0.35
+  Step 1 (1 loss):  $0.35 × 1.15  = $0.40
+  Step 2 (2 losses):$0.35 × 1.15² = $0.46
+  Win or step 2 hit → reset to step 0.
+  Max cycle exposure: $1.21.
 
 ARCHITECTURE
-  Ported from deriv_bot.py:
+  Identical pattern to original:
     • Same DerivClient RPC pattern (req_id → Future map)
     • Same health server for Railway
     • Same reconnect loop with exponential backoff
@@ -39,10 +45,10 @@ ARCHITECTURE
 
 Run:
     export DERIV_API_TOKEN=your_token
-    python main.py
+    python digits_main.py
 
 Backtest (no API needed):
-    python main.py --backtest
+    python digits_main.py --backtest
 """
 
 import asyncio
@@ -89,46 +95,52 @@ class Config:
     api_url: str = "wss://ws.binaryws.com/websockets/v3"
 
     # Contract
-    symbol:   str = "R_10"
-    duration: int = 3          # 1 tick
+    symbol:   str = "1HZ25V"
+    duration: int = 1          # 1 tick — optimal for digit contracts
     currency: str = "USD"
 
-    # ── AUTO-CALCULATION PARAMETERS ──────────────────────────────────────────
+    # ── MARKOV CHAIN PARAMETERS ───────────────────────────────────────────────
 
-    # Bias detection window
-    bias_window: int   = 20    # rolling ticks for even_rate calculation
-    bias_high:   float = 0.65  # even_rate above this → bet ODD
-    bias_low:    float = 0.35  # even_rate below this → bet EVEN
+    # Minimum observations per cell before the Markov signal is trusted
+    markov_min_obs:  int   = 10
+    # P(even | last_digit) must exceed this to fire a long-even signal
+    markov_thresh:   float = 0.54
 
-    # Streak detection
-    min_streak: int = 3        # minimum streak length before considering entry
-    max_streak: int = 8        # streak signal saturates at this length
+    # ── Z-SCORE PARAMETERS ───────────────────────────────────────────────────
 
-    # Confidence weighting
-    bias_weight:   float = 0.50
-    streak_weight: float = 0.50
+    # Baseline window for computing rolling mean/std of even_rate
+    baseline_window: int   = 200
+    # Short window for the instantaneous even_rate observation
+    short_window:    int   = 20
+    # |Z| must exceed this threshold to fire a signal
+    z_thresh:        float = 1.5
 
-    # Auto-calibrated confidence threshold
-    # Starts at 0.60. Updates every RECAL_EVERY trades using rolling hit rate.
-    conf_threshold_init: float = 0.60
-    conf_threshold_min:  float = 0.55
-    conf_threshold_max:  float = 0.75
-    recal_every:         int   = 20   # recalibrate after every N settled trades
+    # ── SIGNAL COMBINATION ───────────────────────────────────────────────────
+
+    markov_weight: float = 0.50
+    zscore_weight: float = 0.50
 
     # Warmup: minimum digits before any trading starts
     warmup_ticks: int = 50
 
-    # ── STAKE / RISK ──────────────────────────────────────────────────────────
+    # Auto-calibrated confidence threshold
+    conf_threshold_init: float = 0.55
+    conf_threshold_min:  float = 0.50
+    conf_threshold_max:  float = 0.75
+    recal_every:         int   = 20
 
-    kelly_frac:  float = 0.25
-    min_stake:   float = 0.35
-    max_stake:   float = 5.00
-    max_balance_pct: float = 0.05   # never risk more than 5% of balance
+    # ── MARTINGALE STAKE SIZING ───────────────────────────────────────────────
 
-    # Cooldown: skip this many ticks after a loss before re-entering
-    loss_cooldown_ticks: int = 13
+    base_stake:      float = 0.35   # step 0
+    martingale_mult: float = 1.15   # multiply on each loss
+    martingale_max:  int   = 2      # maximum steps before reset
+    min_stake:       float = 0.35
+    max_stake:       float = 5.00
+    max_balance_pct: float = 0.05
 
-    # Hard stops
+    # ── RISK / COOLDOWN ───────────────────────────────────────────────────────
+
+    loss_cooldown_ticks:    int   = 3
     max_consecutive_losses: int   = 5
     max_daily_loss_pct:     float = 0.15
 
@@ -141,29 +153,41 @@ class Config:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# AUTO-CALCULATION ENGINE
+# MARKOV + Z-SCORE HYBRID ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DigitEngine:
     """
     Ingests raw price ticks, extracts last digit, and computes:
-      - bias_signal   : how strongly the recent window is skewed
-      - streak_signal : how extreme the current same-outcome streak is
-      - confidence    : weighted combination of the two signals
-      - direction     : EVEN or ODD to bet on (reversion)
 
-    All three calculations are stateless snapshots on each tick —
-    no lookahead, no future knowledge.
+      Markov signal:
+        - Maintains a 10×10 empirical transition matrix (digit → next digit)
+        - From the matrix, derives P(next=even | last_digit=d)
+        - Fires when this probability diverges meaningfully from 0.5
+
+      Z-Score signal:
+        - Tracks rolling even_rate over a long baseline window
+        - Computes Z = (short_window_rate - baseline_mean) / baseline_std
+        - Fires when |Z| > z_thresh
+
+      Both signals must agree in direction; conflict → no trade.
+      Combined confidence = weighted sum of the two normalised signals.
     """
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
-        # Rolling digit history
-        self._digits:   deque = deque(maxlen=max(cfg.bias_window, 200))
-        self._tick:     int   = 0
+        # Rolling digit history (need baseline_window + short_window at minimum)
+        self._digits: deque = deque(maxlen=max(cfg.baseline_window + cfg.short_window, 300))
+        self._tick:   int   = 0
 
-        # Auto-calibrated threshold
+        # 10×10 Markov transition matrix: _markov[from_digit][to_digit] = count
+        self._markov: List[List[int]] = [[0] * 10 for _ in range(10)]
+
+        # Previous digit for transition recording
+        self._prev_digit: Optional[int] = None
+
+        # Auto-calibrated confidence threshold
         self._conf_threshold: float = cfg.conf_threshold_init
 
         # Rolling trade outcomes for threshold recalibration
@@ -177,22 +201,27 @@ class DigitEngine:
 
     def push(self, price: float) -> Optional["Signal"]:
         """
-        Ingest a tick price. Returns a Signal if conditions are met,
-        else None.
+        Ingest a tick price. Returns a Signal if conditions are met, else None.
         """
         digit = self._extract_digit(price)
+
+        # Update Markov transition matrix
+        if self._prev_digit is not None:
+            self._markov[self._prev_digit][digit] += 1
+        self._prev_digit = digit
+
         self._digits.append(digit)
         self._tick += 1
 
         if self._tick < self.cfg.warmup_ticks:
             return None
-        if len(self._digits) < self.cfg.bias_window:
+        if len(self._digits) < self.cfg.baseline_window:
             return None
 
         # Extended cooldown set by recalibrator after a bad losing run
         if self._recal_cooldown_ticks > 0:
             self._recal_cooldown_ticks -= 1
-            return None   # suppress signal, counted as no_signal in skip log
+            return None
 
         return self._evaluate(digit)
 
@@ -219,6 +248,19 @@ class DigitEngine:
         """Distribution of all seen digits (for diagnostics)."""
         return dict(Counter(self._digits))
 
+    def markov_summary(self) -> str:
+        """One-line summary of P(even | last_digit) for all digits."""
+        parts = []
+        for d in range(10):
+            row   = self._markov[d]
+            total = sum(row)
+            if total == 0:
+                parts.append(f"{d}:?")
+            else:
+                p_even = sum(row[e] for e in range(0, 10, 2)) / total
+                parts.append(f"{d}:{p_even:.2f}")
+        return " ".join(parts)
+
     # ── Internal calculations ─────────────────────────────────────────────────
 
     @staticmethod
@@ -229,49 +271,89 @@ class DigitEngine:
     def _evaluate(self, digit: int) -> Optional["Signal"]:
         digits = list(self._digits)
 
-        # ── 1. Bias signal ────────────────────────────────────────────────────
-        window    = digits[-self.cfg.bias_window:]
-        even_rate = sum(1 for d in window if d % 2 == 0) / len(window)
+        # ── 1. Markov signal ──────────────────────────────────────────────────
+        row   = self._markov[digit]
+        total = sum(row)
 
-        if even_rate > self.cfg.bias_high:
-            # Even is over-represented → reversion → bet ODD
-            bias_signal = (even_rate - self.cfg.bias_high) / (1.0 - self.cfg.bias_high)
-            bias_dir    = "ODD"
-        elif even_rate < self.cfg.bias_low:
-            # Odd is over-represented → reversion → bet EVEN
-            bias_signal = (self.cfg.bias_low - even_rate) / self.cfg.bias_low
-            bias_dir    = "EVEN"
+        if total < self.cfg.markov_min_obs:
+            # Not enough observations for this digit — skip
+            return None
+
+        p_even_given_d = sum(row[e] for e in range(0, 10, 2)) / total
+
+        # How far does this deviate from 0.5?
+        # Signal direction: if P(even|d) > thresh → next likely even → bet EVEN
+        #                   if P(odd|d)  > thresh → next likely odd  → bet ODD
+        p_odd_given_d = 1.0 - p_even_given_d
+
+        if p_even_given_d > self.cfg.markov_thresh:
+            markov_dir    = "EVEN"
+            # Normalise: how far above thresh, relative to headroom to 1.0
+            headroom      = 1.0 - self.cfg.markov_thresh
+            markov_signal = (p_even_given_d - self.cfg.markov_thresh) / headroom if headroom > 0 else 0.0
+        elif p_odd_given_d > self.cfg.markov_thresh:
+            markov_dir    = "ODD"
+            headroom      = 1.0 - self.cfg.markov_thresh
+            markov_signal = (p_odd_given_d - self.cfg.markov_thresh) / headroom if headroom > 0 else 0.0
         else:
-            # Dead zone — no bias signal
+            # Neither direction has sufficient Markov edge
             return None
 
-        # ── 2. Streak signal ─────────────────────────────────────────────────
-        streak_len  = self._current_streak(digits)
-        streak_type = "EVEN" if digits[-1] % 2 == 0 else "ODD"
+        markov_signal = round(min(1.0, markov_signal), 4)
 
-        if streak_len < self.cfg.min_streak:
+        # ── 2. Z-Score signal (adaptive) ──────────────────────────────────────
+        baseline_slice = digits[-self.cfg.baseline_window:]
+        short_slice    = digits[-self.cfg.short_window:]
+
+        # Even rate over baseline
+        b_even_rate = sum(1 for d in baseline_slice if d % 2 == 0) / len(baseline_slice)
+
+        # Variance from rolling chunks within baseline
+        # Approximate: split baseline into non-overlapping short_window chunks
+        chunk_rates = []
+        step = self.cfg.short_window
+        for i in range(0, len(baseline_slice) - step + 1, step):
+            chunk = baseline_slice[i:i + step]
+            chunk_rates.append(sum(1 for d in chunk if d % 2 == 0) / len(chunk))
+
+        if len(chunk_rates) < 2:
+            # Cannot compute std — no signal yet
             return None
 
-        # Streak direction must align with bias direction
-        # (streak of evens → expect odd, same as bias saying too many evens)
-        if streak_type != bias_dir.replace("ODD", "EVEN_").replace("EVEN", "ODD_").rstrip("_"):
-            # streak_type is the current run; bias_dir is what we BET
-            # if bias_dir=ODD, current streak must be EVEN (too many evens)
-            pass  # checked below
+        b_mean = sum(chunk_rates) / len(chunk_rates)
+        b_var  = sum((r - b_mean) ** 2 for r in chunk_rates) / (len(chunk_rates) - 1)
+        b_std  = math.sqrt(b_var) if b_var > 0 else 1e-6
 
-        streak_dir = "ODD" if streak_type == "EVEN" else "EVEN"
-        if streak_dir != bias_dir:
-            # Streak and bias disagree — signals conflict, skip
+        # Short window even rate
+        s_even_rate = sum(1 for d in short_slice if d % 2 == 0) / len(short_slice)
+
+        z_score = (s_even_rate - b_mean) / b_std
+
+        if abs(z_score) < self.cfg.z_thresh:
+            # Z-score not significant enough
             return None
 
-        # Normalise streak signal to [0, 1], saturating at max_streak
-        streak_signal = min(streak_len - self.cfg.min_streak + 1,
-                            self.cfg.max_streak - self.cfg.min_streak + 1) / \
-                        (self.cfg.max_streak - self.cfg.min_streak + 1)
+        # Z-Score direction: positive Z → too many evens → reversion → bet ODD
+        #                    negative Z → too many odds  → reversion → bet EVEN
+        if z_score > 0:
+            zscore_dir    = "ODD"
+            zscore_signal = min(1.0, (abs(z_score) - self.cfg.z_thresh) / self.cfg.z_thresh)
+        else:
+            zscore_dir    = "EVEN"
+            zscore_signal = min(1.0, (abs(z_score) - self.cfg.z_thresh) / self.cfg.z_thresh)
 
-        # ── 3. Confidence score ───────────────────────────────────────────────
-        confidence = (self.cfg.bias_weight   * bias_signal +
-                      self.cfg.streak_weight * streak_signal)
+        zscore_signal = round(zscore_signal, 4)
+
+        # ── 3. Agreement check ────────────────────────────────────────────────
+        if markov_dir != zscore_dir:
+            # Signals conflict — no trade
+            return None
+
+        direction = markov_dir
+
+        # ── 4. Combined confidence ────────────────────────────────────────────
+        confidence = (self.cfg.markov_weight * markov_signal +
+                      self.cfg.zscore_weight * zscore_signal)
         confidence = round(min(1.0, confidence), 4)
 
         if confidence < self._conf_threshold:
@@ -280,44 +362,25 @@ class DigitEngine:
         return Signal(
             tick          = self._tick,
             digit         = digit,
-            direction     = bias_dir,
+            direction     = direction,
             confidence    = confidence,
-            even_rate     = round(even_rate, 4),
-            bias_signal   = round(bias_signal, 4),
-            streak_len    = streak_len,
-            streak_signal = round(streak_signal, 4),
+            p_even_given_d= round(p_even_given_d, 4),
+            markov_signal = markov_signal,
+            z_score       = round(z_score, 4),
+            zscore_signal = zscore_signal,
+            short_rate    = round(s_even_rate, 4),
+            baseline_mean = round(b_mean, 4),
             threshold     = self._conf_threshold,
         )
-
-    @staticmethod
-    def _current_streak(digits: list) -> int:
-        """Length of the current consecutive even/odd run."""
-        if not digits:
-            return 0
-        parity = digits[-1] % 2
-        count  = 0
-        for d in reversed(digits):
-            if d % 2 == parity:
-                count += 1
-            else:
-                break
-        return count
 
     def _recalibrate(self):
         """
         Adjust confidence threshold based on recent hit rate.
 
-        LOGIC (corrected):
-          Winning (hit_rate > 0.55)  -> hold steady. Signals are working,
-            don't cut off a good edge by raising the bar.
-          Losing moderately (0.45-0.55) -> raise threshold +0.01.
-            Become more selective.
-          Losing badly (hit_rate < 0.45) -> raise threshold +0.02 and flag
-            an extended cooldown. Signals clearly not working right now.
-
-        Threshold only ever moves UP here — it never self-lowers.
-        That means losses make the bot more selective, not more aggressive.
-        Bounded to [conf_threshold_min, conf_threshold_max].
+        Winning (hit_rate > 0.55)  → hold steady.
+        Losing moderately (0.45-0.55) → raise threshold +0.01 (more selective).
+        Losing badly (< 0.45) → raise threshold +0.02 + 30-tick cooldown.
+        Threshold only moves up; losing makes the bot more selective.
         """
         if len(self._recent_outcomes) < 10:
             return
@@ -326,11 +389,9 @@ class DigitEngine:
         old      = self._conf_threshold
 
         if hit_rate > 0.55:
-            # Winning — hold steady, let the edge run
-            pass
+            pass  # winning — hold steady
 
         elif hit_rate < 0.45:
-            # Losing badly — raise threshold by 0.02 + flag extended cooldown
             self._conf_threshold = min(
                 self.cfg.conf_threshold_max,
                 self._conf_threshold + 0.02
@@ -338,12 +399,11 @@ class DigitEngine:
             self._recal_cooldown_ticks = 30
             log.warning(
                 f"[RECAL] hit_rate={hit_rate:.1%} — signals weak. "
-                f"Threshold {old:.3f} -> {self._conf_threshold:.3f}. "
+                f"Threshold {old:.3f} → {self._conf_threshold:.3f}. "
                 f"Extended cooldown: 30 ticks."
             )
 
         else:
-            # Losing moderately (0.45-0.55) — raise threshold by 0.01
             self._conf_threshold = min(
                 self.cfg.conf_threshold_max,
                 self._conf_threshold + 0.01
@@ -351,7 +411,7 @@ class DigitEngine:
             if abs(self._conf_threshold - old) > 0.001:
                 log.info(
                     f"[RECAL] hit_rate={hit_rate:.1%} — marginal. "
-                    f"Threshold {old:.3f} -> {self._conf_threshold:.3f}."
+                    f"Threshold {old:.3f} → {self._conf_threshold:.3f}."
                 )
 
         self._trades_since_cal = 0
@@ -363,25 +423,27 @@ class DigitEngine:
 
 @dataclass
 class Signal:
-    tick:          int
-    digit:         int
-    direction:     str    # "EVEN" or "ODD"
-    confidence:    float
-    even_rate:     float
-    bias_signal:   float
-    streak_len:    int
-    streak_signal: float
-    threshold:     float
+    tick:           int
+    digit:          int
+    direction:      str    # "EVEN" or "ODD"
+    confidence:     float
+    p_even_given_d: float  # Markov P(even | last digit)
+    markov_signal:  float  # normalised markov component [0,1]
+    z_score:        float  # raw Z value
+    zscore_signal:  float  # normalised zscore component [0,1]
+    short_rate:     float  # even_rate over short window
+    baseline_mean:  float  # rolling baseline even_rate mean
+    threshold:      float
 
-    def stake(self, balance: float, cfg: Config) -> float:
+    def stake(self, balance: float, cfg: Config, martingale_step: int) -> float:
         """
-        Kelly-lite sizing.
-        Simplified Kelly for symmetric p=confidence, b=1 payout:
-          f* = p - (1-p) = 2p - 1
+        Martingale 1.15×, max 2 steps.
+        step 0 → base_stake
+        step 1 → base_stake × 1.15
+        step 2 → base_stake × 1.15²
+        Capped at max_stake and max_balance_pct.
         """
-        p      = self.confidence
-        f_star = max(0.0, 2 * p - 1)
-        raw    = cfg.kelly_frac * f_star * balance
+        raw = cfg.base_stake * (cfg.martingale_mult ** martingale_step)
         return round(
             max(cfg.min_stake,
                 min(raw, cfg.max_stake, balance * cfg.max_balance_pct)),
@@ -390,10 +452,11 @@ class Signal:
 
     def __str__(self):
         return (
-            f"tick={self.tick}  digit={self.digit}  direction={self.direction}  "
-            f"conf={self.confidence:.3f}  even_rate={self.even_rate:.3f}  "
-            f"streak={self.streak_len}  "
-            f"bias_sig={self.bias_signal:.3f}  streak_sig={self.streak_signal:.3f}  "
+            f"tick={self.tick}  digit={self.digit}  dir={self.direction}  "
+            f"conf={self.confidence:.3f}  P(even|d)={self.p_even_given_d:.3f}  "
+            f"Z={self.z_score:+.3f}  short_rate={self.short_rate:.3f}  "
+            f"baseline_μ={self.baseline_mean:.3f}  "
+            f"m_sig={self.markov_signal:.3f}  z_sig={self.zscore_signal:.3f}  "
             f"threshold={self.threshold:.3f}"
         )
 
@@ -412,7 +475,10 @@ class RiskManager:
         self._pause_reason    = ""
         self._start_balance:  Optional[float] = None
         self._daily_pnl       = 0.0
-        self._cooldown_ticks  = 0   # ticks remaining in cooldown
+        self._cooldown_ticks  = 0
+
+        # Martingale state
+        self._martingale_step: int = 0
 
     def set_balance(self, b: float):
         if self._start_balance is None:
@@ -422,6 +488,10 @@ class RiskManager:
         """Call on every tick to decrement cooldown counter."""
         if self._cooldown_ticks > 0:
             self._cooldown_ticks -= 1
+
+    @property
+    def martingale_step(self) -> int:
+        return self._martingale_step
 
     def can_trade(self) -> Tuple[bool, str]:
         if self._in_trade:
@@ -448,21 +518,33 @@ class RiskManager:
     def on_close(self, won: bool, profit: float):
         self._in_trade   = False
         self._daily_pnl += profit
+
         if won:
-            self._consec_losses  = 0
-            self._cooldown_ticks = 0
+            self._consec_losses    = 0
+            self._cooldown_ticks   = 0
+            self._martingale_step  = 0   # reset on win
         else:
-            self._consec_losses  += 1
-            self._cooldown_ticks  = self.cfg.loss_cooldown_ticks
+            self._consec_losses += 1
+            self._cooldown_ticks = self.cfg.loss_cooldown_ticks
+
+            # Advance martingale, but never beyond max step
+            if self._martingale_step < self.cfg.martingale_max:
+                self._martingale_step += 1
+            else:
+                # Hit max step — reset after this loss
+                self._martingale_step = 0
+
             log.info(
                 f"LOSS #{self._consec_losses} | "
+                f"martingale_step={self._martingale_step} | "
                 f"cooldown={self.cfg.loss_cooldown_ticks} ticks"
             )
 
     def reset(self):
-        self._paused        = False
-        self._consec_losses = 0
-        self._cooldown_ticks = 0
+        self._paused           = False
+        self._consec_losses    = 0
+        self._cooldown_ticks   = 0
+        self._martingale_step  = 0
         log.info("RiskManager: reset")
 
     def release_trade_lock(self):
@@ -478,8 +560,10 @@ class History:
 
     COLS = [
         "ts", "tick", "contract_id", "direction", "digit",
-        "stake", "confidence", "even_rate", "streak_len",
-        "bias_signal", "streak_signal", "threshold",
+        "stake", "martingale_step", "confidence",
+        "p_even_given_d", "markov_signal",
+        "z_score", "zscore_signal",
+        "short_rate", "baseline_mean", "threshold",
         "won", "profit", "balance", "settle_source",
     ]
 
@@ -528,7 +612,7 @@ class History:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DERIV WEBSOCKET CLIENT  (same RPC pattern as deriv_bot.py)
+# DERIV WEBSOCKET CLIENT  (same RPC pattern as original)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DerivClient:
@@ -563,7 +647,7 @@ class DerivClient:
     async def subscribe_ticks(self, cb: Callable):
         self._tick_cb = cb
         await self._send({
-            "ticks":    self.cfg.symbol,
+            "ticks":     self.cfg.symbol,
             "subscribe": 1,
             "req_id":    self._next(),
         })
@@ -634,9 +718,9 @@ class DerivClient:
         return self._rid
 
     async def _rpc(self, payload: dict) -> dict:
-        rid              = self._next()
+        rid               = self._next()
         payload["req_id"] = rid
-        fut              = asyncio.get_event_loop().create_future()
+        fut               = asyncio.get_event_loop().create_future()
         self._pending[rid] = fut
         await self._send(payload)
         try:
@@ -739,7 +823,7 @@ class Bot:
     # ── Tick handler ──────────────────────────────────────────────────────────
 
     async def on_tick(self, price: float):
-        self.risk.tick()   # decrement cooldown counter
+        self.risk.tick()
 
         signal = self.engine.push(price)
 
@@ -776,9 +860,10 @@ class Bot:
     # ── Trade execution ───────────────────────────────────────────────────────
 
     async def _execute(self, sig: Signal):
-        stake = sig.stake(self.client.balance, self.cfg)
+        stake = sig.stake(self.client.balance, self.cfg, self.risk.martingale_step)
         log.info(
-            f"SIGNAL | {sig} | stake=${stake:.2f} "
+            f"SIGNAL | {sig} | "
+            f"stake=${stake:.2f} (step={self.risk.martingale_step}) "
             f"balance=${self.client.balance:.2f}"
         )
 
@@ -796,22 +881,24 @@ class Bot:
         buy_price = float(result.get("buy_price", stake))
 
         self.history.add({
-            "ts":           datetime.utcnow().isoformat(),
-            "tick":         sig.tick,
-            "contract_id":  cid,
-            "direction":    sig.direction,
-            "digit":        sig.digit,
-            "stake":        buy_price,
-            "confidence":   sig.confidence,
-            "even_rate":    sig.even_rate,
-            "streak_len":   sig.streak_len,
-            "bias_signal":  sig.bias_signal,
-            "streak_signal":sig.streak_signal,
-            "threshold":    sig.threshold,
+            "ts":             datetime.utcnow().isoformat(),
+            "tick":           sig.tick,
+            "contract_id":    cid,
+            "direction":      sig.direction,
+            "digit":          sig.digit,
+            "stake":          buy_price,
+            "martingale_step":self.risk.martingale_step,
+            "confidence":     sig.confidence,
+            "p_even_given_d": sig.p_even_given_d,
+            "markov_signal":  sig.markov_signal,
+            "z_score":        sig.z_score,
+            "zscore_signal":  sig.zscore_signal,
+            "short_rate":     sig.short_rate,
+            "baseline_mean":  sig.baseline_mean,
+            "threshold":      sig.threshold,
         })
 
         # 1-tick contract — settle almost immediately
-        # Wait a small buffer then poll
         await asyncio.sleep(3)
         await self._settle(cid, buy_price, sig)
 
@@ -895,7 +982,8 @@ class Bot:
             f"{'WIN' if won else 'LOSS'} | cid={cid} profit={profit:+.4f} "
             f"balance={self.client.balance:.2f} source={settle_source} | "
             f"WR={stats['win_rate']:.1%} n={stats['n']} "
-            f"P&L={stats['pnl']:+.4f}"
+            f"P&L={stats['pnl']:+.4f} "
+            f"martingale_step→{self.risk.martingale_step}"
         )
 
     # ── Logging helpers ───────────────────────────────────────────────────────
@@ -909,6 +997,8 @@ class Bot:
             f"[STATE tick={self.engine.tick}] price={price:.4f} "
             f"even_rate={even/tot:.3f} ({even}/{tot}) "
             f"threshold={self.engine.threshold:.3f} "
+            f"martingale_step={self.risk.martingale_step} "
+            f"markov: {self.engine.markov_summary()} "
             f"stats={self.history.stats}"
         )
 
@@ -948,11 +1038,10 @@ class Bot:
 def run_backtest(cfg: Config, n_ticks: int = 5000, seed: int = 42):
     random.seed(seed)
     print("=" * 64)
-    print("Backtest: R_100 Digit Even/Odd | self-calibrating")
+    print("Backtest: 1HZ25V Digit Even/Odd | Markov + Z-Score + Martingale")
     print("=" * 64)
 
-    # Generate synthetic R_100 tick prices
-    # Last digit is uniform 0-9 with slight autocorrelation (streak bias)
+    # Generate synthetic tick prices with realistic digit distribution
     def gen_ticks(n):
         base   = 12345.00
         prices = []
@@ -963,9 +1052,9 @@ def run_backtest(cfg: Config, n_ticks: int = 5000, seed: int = 42):
             prices.append(price)
         return prices
 
-    ticks   = gen_ticks(n_ticks)
-    engine  = DigitEngine(cfg)
-    risk    = RiskManager(cfg)
+    ticks  = gen_ticks(n_ticks)
+    engine = DigitEngine(cfg)
+    risk   = RiskManager(cfg)
     risk.set_balance(1000.0)
 
     balance      = 1000.0
@@ -987,7 +1076,8 @@ def run_backtest(cfg: Config, n_ticks: int = 5000, seed: int = 42):
             skip_counts[reason] += 1
             continue
 
-        stake  = signal.stake(balance, cfg)
+        stake = signal.stake(balance, cfg, risk.martingale_step)
+
         # Simulate outcome: next digit is the result
         if i + 1 < len(ticks):
             next_digit = int(round(ticks[i + 1] * 100)) % 10
@@ -1015,7 +1105,8 @@ def run_backtest(cfg: Config, n_ticks: int = 5000, seed: int = 42):
             print(
                 f"  [tick {i:5d}] trades={trades} "
                 f"WR={wins/trades:.1%} bal={balance:.2f} "
-                f"threshold={engine.threshold:.3f}"
+                f"threshold={engine.threshold:.3f} "
+                f"mstep={risk.martingale_step}"
             )
 
     wr  = wins / trades if trades else 0.0
@@ -1030,15 +1121,16 @@ def run_backtest(cfg: Config, n_ticks: int = 5000, seed: int = 42):
     print(f"  P&L            : {pnl:+.2f} USD  (start 1000)")
     print(f"  Max drawdown   : {dd:.1%}")
     print(f"  Final threshold: {engine.threshold:.3f}")
+    print(f"  Markov P(even|d): {engine.markov_summary()}")
 
     if skip_counts:
         total = sum(skip_counts.values())
         print(f"\n  Skip breakdown ({total} total):")
         for gate, count in skip_counts.most_common():
-            print(f"    {gate:20s}: {count} ({count/total:.0%})")
+            print(f"    {gate:25s}: {count} ({count/total:.0%})")
 
     dist = engine.digit_distribution()
-    print(f"\n  Digit distribution (last {cfg.bias_window} ticks): {dist}")
+    print(f"\n  Digit distribution: {dist}")
     print("=" * 64)
 
 
@@ -1088,12 +1180,12 @@ async def live(cfg: Config):
     signal.signal(signal.SIGTERM, handle_signal)
 
     log.info("=" * 64)
-    log.info(f"R_100 Digits Even/Odd Bot")
-    log.info(f"Bias window={cfg.bias_window}  bias_high={cfg.bias_high}  "
-             f"bias_low={cfg.bias_low}")
-    log.info(f"Min streak={cfg.min_streak}  Confidence init={cfg.conf_threshold_init}")
-    log.info(f"Kelly frac={cfg.kelly_frac}  Min stake=${cfg.min_stake}  "
-             f"Loss cooldown={cfg.loss_cooldown_ticks} ticks")
+    log.info(f"1HZ25V Digits Even/Odd Bot — Markov + Z-Score Engine")
+    log.info(f"Symbol={cfg.symbol}  Duration={cfg.duration}t")
+    log.info(f"Markov thresh={cfg.markov_thresh}  Z_thresh={cfg.z_thresh}")
+    log.info(f"Baseline window={cfg.baseline_window}  Short window={cfg.short_window}")
+    log.info(f"Martingale: {cfg.base_stake}× {cfg.martingale_mult} max_steps={cfg.martingale_max}")
+    log.info(f"Confidence init={cfg.conf_threshold_init}")
     log.info("=" * 64)
 
     _start_health_server()
