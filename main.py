@@ -121,7 +121,7 @@ class Config:
     # LOG ANALYSIS: even_rate fluctuates in a tight band (0.46–0.58); the
     # baseline std over 20-tick chunks is small so |Z| rarely exceeds 1.5.
     # Lowered to 0.8 to capture genuine short-window deviations from baseline.
-    z_thresh:        float = 0.8
+    z_thresh:        float = 0.9
 
     # ── SIGNAL COMBINATION ───────────────────────────────────────────────────
 
