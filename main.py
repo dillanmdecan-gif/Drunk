@@ -96,7 +96,7 @@ class Config:
 
     # Contract
     symbol:   str = "1HZ25V"
-    duration: int = 1          # 1 tick — optimal for digit contracts
+    duration: int = 5          # 1 tick — optimal for digit contracts
     currency: str = "USD"
 
     # ── MARKOV CHAIN PARAMETERS ───────────────────────────────────────────────
@@ -142,8 +142,8 @@ class Config:
     # ── MARTINGALE STAKE SIZING ───────────────────────────────────────────────
 
     base_stake:      float = 0.35   # step 0
-    martingale_mult: float = 1.15   # multiply on each loss
-    martingale_max:  int   = 2      # maximum steps before reset
+    martingale_mult: float = 1.28   # multiply on each loss
+    martingale_max:  int   = 3      # maximum steps before reset
     min_stake:       float = 0.35
     max_stake:       float = 5.00
     max_balance_pct: float = 0.05
