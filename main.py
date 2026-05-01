@@ -63,7 +63,7 @@ import sys
 import time
 from collections import deque, Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
 import websockets
@@ -102,18 +102,26 @@ class Config:
     # ── MARKOV CHAIN PARAMETERS ───────────────────────────────────────────────
 
     # Minimum observations per cell before the Markov signal is trusted
-    markov_min_obs:  int   = 7
+    # LOG ANALYSIS: cells fill to ~5 obs in the first 50 ticks; 10 was blocking
+    # all signals until too late when the matrix had already converged to ~0.50
+    markov_min_obs:  int   = 5
     # P(even | last_digit) must exceed this to fire a long-even signal
-    markov_thresh:   float = 0.52
+    # LOG ANALYSIS: 1HZ25V Markov matrix converges to 0.49–0.51 for all digits;
+    # 0.54 was permanently unreachable after tick ~150. Lowered to 0.51 to trade
+    # on real (small) structural deviations rather than requiring casino-level edge.
+    markov_thresh:   float = 0.51
 
     # ── Z-SCORE PARAMETERS ───────────────────────────────────────────────────
 
     # Baseline window for computing rolling mean/std of even_rate
-    baseline_window: int   = 80
+    baseline_window: int   = 200
     # Short window for the instantaneous even_rate observation
     short_window:    int   = 20
     # |Z| must exceed this threshold to fire a signal
-    z_thresh:        float = 0.9
+    # LOG ANALYSIS: even_rate fluctuates in a tight band (0.46–0.58); the
+    # baseline std over 20-tick chunks is small so |Z| rarely exceeds 1.5.
+    # Lowered to 0.8 to capture genuine short-window deviations from baseline.
+    z_thresh:        float = 0.8
 
     # ── SIGNAL COMBINATION ───────────────────────────────────────────────────
 
@@ -124,9 +132,11 @@ class Config:
     warmup_ticks: int = 50
 
     # Auto-calibrated confidence threshold
-    conf_threshold_init: float = 0.55
-    conf_threshold_min:  float = 0.50
-    conf_threshold_max:  float = 0.75
+    # LOG ANALYSIS: with tighter markov/z thresholds the combined signal will
+    # score in the 0.50–0.60 range; the old 0.55 init would still block most.
+    conf_threshold_init: float = 0.50
+    conf_threshold_min:  float = 0.48
+    conf_threshold_max:  float = 0.65
     recal_every:         int   = 20
 
     # ── MARTINGALE STAKE SIZING ───────────────────────────────────────────────
@@ -881,7 +891,7 @@ class Bot:
         buy_price = float(result.get("buy_price", stake))
 
         self.history.add({
-            "ts":             datetime.utcnow().isoformat(),
+            "ts":             datetime.now(timezone.utc).isoformat(),
             "tick":           sig.tick,
             "contract_id":    cid,
             "direction":      sig.direction,
