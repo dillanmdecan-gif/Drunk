@@ -96,7 +96,7 @@ class Config:
 
     # Contract
     symbol:   str = "R_10"
-    duration: int = 1          # 1 tick — optimal for digit contracts
+    duration: int = 5          # 1 tick — optimal for digit contracts
     currency: str = "USD"
 
     # ── MARKOV CHAIN PARAMETERS ───────────────────────────────────────────────
