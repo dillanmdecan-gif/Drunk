@@ -95,7 +95,7 @@ class Config:
     api_url: str = "wss://ws.binaryws.com/websockets/v3"
 
     # Contract
-    symbol:   str = "IHZ25V"
+    symbol:   str = "1HZ25V"
     duration: int = 1          # 1 tick — optimal for digit contracts
     currency: str = "USD"
 
@@ -121,7 +121,7 @@ class Config:
     # LOG ANALYSIS: even_rate fluctuates in a tight band (0.46–0.58); the
     # baseline std over 20-tick chunks is small so |Z| rarely exceeds 1.5.
     # Lowered to 0.8 to capture genuine short-window deviations from baseline.
-    z_thresh:        float = 0.9
+    z_thresh:        float = 0.8
 
     # ── SIGNAL COMBINATION ───────────────────────────────────────────────────
 
@@ -142,7 +142,7 @@ class Config:
     # ── MARTINGALE STAKE SIZING ───────────────────────────────────────────────
 
     base_stake:      float = 0.35   # step 0
-    martingale_mult: float = 1.29   # multiply on each loss
+    martingale_mult: float = 1.15   # multiply on each loss
     martingale_max:  int   = 2      # maximum steps before reset
     min_stake:       float = 0.35
     max_stake:       float = 5.00
@@ -215,9 +215,13 @@ class DigitEngine:
         """
         digit = self._extract_digit(price)
 
-        # Update Markov transition matrix
-        if self._prev_digit is not None:
-            self._markov[self._prev_digit][digit] += 1
+        # Update Markov transition matrix: _prev_digit → digit
+        # We capture _prev_digit *before* overwriting it — this is the digit
+        # whose outgoing row has just been updated and is now meaningful to
+        # condition on (i.e. "last tick's digit").
+        last_tick_digit = self._prev_digit
+        if last_tick_digit is not None:
+            self._markov[last_tick_digit][digit] += 1
         self._prev_digit = digit
 
         self._digits.append(digit)
@@ -233,7 +237,13 @@ class DigitEngine:
             self._recal_cooldown_ticks -= 1
             return None
 
-        return self._evaluate(digit)
+        # Evaluate using the *last tick's digit* as the Markov conditioning key.
+        # That row (_markov[last_tick_digit]) reflects all observed transitions
+        # *out of* that digit, including the one we just recorded above.
+        # The current digit's row has no new outgoing observation yet.
+        if last_tick_digit is None:
+            return None
+        return self._evaluate(last_tick_digit)
 
     def record_outcome(self, won: bool):
         """Call after each settled trade to feed the recalibrator."""
