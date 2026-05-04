@@ -104,12 +104,12 @@ class Config:
     # Minimum observations per cell before the Markov signal is trusted
     # LOG ANALYSIS: cells fill to ~5 obs in the first 50 ticks; 10 was blocking
     # all signals until too late when the matrix had already converged to ~0.50
-    markov_min_obs:  int   = 5
+    markov_min_obs:  int   = 10
     # P(even | last_digit) must exceed this to fire a long-even signal
     # LOG ANALYSIS: 1HZ25V Markov matrix converges to 0.49–0.51 for all digits;
     # 0.54 was permanently unreachable after tick ~150. Lowered to 0.51 to trade
     # on real (small) structural deviations rather than requiring casino-level edge.
-    markov_thresh:   float = 0.51
+    markov_thresh:   float = 0.52
 
     # ── Z-SCORE PARAMETERS ───────────────────────────────────────────────────
 
@@ -121,7 +121,7 @@ class Config:
     # LOG ANALYSIS: even_rate fluctuates in a tight band (0.46–0.58); the
     # baseline std over 20-tick chunks is small so |Z| rarely exceeds 1.5.
     # Lowered to 0.8 to capture genuine short-window deviations from baseline.
-    z_thresh:        float = 0.8
+    z_thresh:        float = 1.0
 
     # ── SIGNAL COMBINATION ───────────────────────────────────────────────────
 
@@ -137,7 +137,7 @@ class Config:
     conf_threshold_init: float = 0.50
     conf_threshold_min:  float = 0.48
     conf_threshold_max:  float = 0.65
-    recal_every:         int   = 20
+    recal_every:         int   = 40
 
     # ── MARTINGALE STAKE SIZING ───────────────────────────────────────────────
 
@@ -150,8 +150,8 @@ class Config:
 
     # ── RISK / COOLDOWN ───────────────────────────────────────────────────────
 
-    loss_cooldown_ticks:    int   = 3
-    max_consecutive_losses: int   = 5
+    loss_cooldown_ticks:    int   = 7
+    max_consecutive_losses: int   = 9
     max_daily_loss_pct:     float = 0.15
 
     # ── FILES ─────────────────────────────────────────────────────────────────
