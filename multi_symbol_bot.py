@@ -64,7 +64,7 @@ except ImportError:
 DERIV_API_TOKEN       = os.getenv("DERIV_API_TOKEN", "YOUR_TOKEN_HERE")
 DERIV_APP_ID          = os.getenv("DERIV_APP_ID", "1089")
 TRADE_MODE            = os.getenv("TRADE_MODE", "demo")
-BASE_STAKE            = float(os.getenv("BASE_STAKE", "1.0"))
+BASE_STAKE            = float(os.getenv("BASE_STAKE", "0.5"))
 MAX_DAILY_LOSS        = float(os.getenv("MAX_DAILY_LOSS", "10.0"))
 MAX_GLOBAL_DAILY_LOSS = float(os.getenv("MAX_GLOBAL_DAILY_LOSS", "100.0"))
 MAX_CONCURRENT_TRADES = int(os.getenv("MAX_CONCURRENT_TRADES", "22"))
@@ -77,9 +77,9 @@ WS_PING_INTERVAL    = 60
 WS_PING_TIMEOUT     = 60
 
 # Per-trade safety constants
-MARTINGALE_MULTIPLIER  = 1.45
+MARTINGALE_MULTIPLIER  = 1.25
 MARTINGALE_MAX_STEPS   = 4
-MARTINGALE_TRIGGER     = 1
+MARTINGALE_TRIGGER     = 2
 THRESHOLD_NO_TRADE     = 0.55
 THRESHOLD_SMALL        = 0.57
 THRESHOLD_NORMAL       = 0.67
@@ -236,8 +236,7 @@ ACTIVE_SYMBOLS = [
     "frxAUDCAD",   # AUD/CAD
     "frxAUDCHF",   # AUD/CHF
     "frxAUDNZD",   # AUD/NZD
-    "frxNZDJPY",   # NZD/JPY
-
+   
    ]
 
 # -------------------------------------------------------
